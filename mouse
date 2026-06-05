@@ -1,0 +1,111 @@
+#!/sbin/openrc-run
+
+description="Initializes Mouse DPI, Buttons, and LED via Embedded Python"
+
+depend() {
+    need localmount
+}
+
+start() {
+    ebegin "Executing Embedded Python HID initialization"
+    
+    # Передаем весь Python-код как текст (Heredoc) напрямую в python3
+    python3 << 'EOF'
+import sys
+import time
+import usb.core
+import usb.util
+
+VENDOR_ID = 0x30fa
+PRODUCT_ID = 0x1701
+
+# Полный список пакетов на отправку
+PACKETS_LIST = [
+    # Блок маппинга кнопок / регистров (команда 0x10)
+    [0x07, 0x10, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00],  # Кадр 341
+    [0x07, 0x10, 0x02, 0x02, 0x00, 0x00, 0x00, 0x00],  # Кадр 343
+    [0x07, 0x10, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00],  # Кадр 345
+    [0x07, 0x10, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 347
+    [0x07, 0x10, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 349
+    [0x07, 0x10, 0x06, 0x0c, 0x00, 0x00, 0x00, 0x00],  # Кадр 351
+    [0x07, 0x10, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 353
+    [0x07, 0x10, 0x08, 0x0b, 0x00, 0x00, 0x00, 0x00],  # Кадр 355
+    [0x07, 0x10, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 357
+    [0x07, 0x10, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 359
+    [0x07, 0x10, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 361
+    [0x07, 0x10, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 363
+    [0x07, 0x10, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 365
+    [0x07, 0x10, 0x0e, 0x00, 0x00, 0x00, 0x00, 0x00],  # Кадр 367
+
+    # Частота опроса USB
+    [0x07, 0x12, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00],  # Кадр 369
+
+    # Сетка DPI
+    [0x07, 0x09, 0x02, 0x48, 0x0f, 0x00, 0x00, 0x00],  # 800 синий
+    [0x07, 0x09, 0x02, 0x59, 0x0f, 0x00, 0x00, 0x00],  # 1000 розовый
+    [0x07, 0x09, 0x02, 0x7a, 0x0f, 0x00, 0x00, 0x00],  # 1200 красный
+    [0x07, 0x09, 0x02, 0xab, 0x0f, 0x00, 0x00, 0x00],  # 2000 светло-фиолетовый
+
+    # Подсветка
+    [0x07, 0x13, 0x7f, 0x00, 0x00, 0x00, 0x20, 0x07],  # постоянно включена
+]
+
+print("[Python] Поиск мыши на USB-шине...")
+dev = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+
+if dev is None:
+    print("[Python] Ошибка: Мышь не найдена.")
+    sys.exit(1)
+
+detached_interfaces = []
+
+# Освобождаем интерфейсы от драйверов ядра Linux
+for interface in (0, 1):
+    if dev.is_kernel_driver_active(interface):
+        try:
+            dev.detach_kernel_driver(interface)
+            detached_interfaces.append(interface)
+            print(f"[Python] Интерфейс {interface} успешно изолирован от ядра.")
+        except usb.core.USBError as e:
+            print(f"[Python] Не удалось освободить интерфейс {interface}: {e}")
+
+success = True
+try:
+    for idx, packet in enumerate(PACKETS_LIST, start=1):
+        hex_packet = ['0x{:02x}'.format(b) for b in packet]
+#        print(f"[Python] Отправка пакета {idx}/{len(PACKETS_LIST)}: {hex_packet}")
+        
+        dev.ctrl_transfer(
+            bmRequestType=0x21,
+            bRequest=0x09,
+            wValue=0x0307,
+            wIndex=0x0001,
+            data_or_wLength=packet,
+            timeout=1000
+        )
+        if idx < len(PACKETS_LIST):
+            time.sleep(0.05)
+            
+    print("[Python] [УСПЕХ] Все пакеты успешно отправлены!")
+
+except usb.core.USBError as e:
+    print(f"[Python] [ОШИБКА] Мышь отвергла пакет: {e}")
+    success = False
+
+finally:
+    usb.util.dispose_resources(dev)
+    for interface in detached_interfaces:
+        try:
+            dev.attach_kernel_driver(interface)
+        except:
+            pass
+#    print("[Python] Управление устройством возвращено ОС.")
+    sys.exit(0 if success else 1)
+EOF
+
+    eend $? "Failed to configure mouse"
+}
+
+stop() {
+    return 0
+}
